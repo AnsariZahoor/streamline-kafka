@@ -1,0 +1,105 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.8.6
+    container_name: kafka
+    ports:
+      - "9092:9092"
+
+    environment:
+      KAFKA_KRAFT_MODE: 'true'
+
+      CLUSTER_ID: '1L6g7nGhU-eAKfL--X25wo'
+      KAFKA_NODE_ID: 1
+
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+
+    volumes:
+      - kafka_kraft:/var/lib/kafka/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  futures-arbitrage:
+    build: .
+    container_name: futures-arbitrage
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      ARBITRAGE_THRESHOLD: "0.2"
+      STALENESS_SECONDS: "5"
+    command: ["python", "-u", "consumer/arb_detector.py"]
+
+  redis-sink:
+    build: .
+    container_name: redis-sink
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379/0
+      REDIS_KEY_TTL: "60"
+      KAFKA_TOPICS: "binance-futures-ticker,binance-spot-ticker,bybit-futures-ticker,bybit-spot-ticker,hyperliquid-futures-ticker"
+    command: ["python", "-u", "consumer/redis_sink.py"]
+
+  spread-analytics:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: spread-analytics
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      FLINK_INPUT_TOPICS: "binance-futures-ticker,bybit-futures-ticker"
+      FLINK_OUTPUT_TOPIC: "spread-analytics"
+      SPREAD_WINDOW_SECONDS: "300"
+      FLINK_PARALLELISM: "1"
+
+  snowflake-sink:
+    build: .
+    container_name: snowflake-sink
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - spread-analytics
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      SNOWFLAKE_KAFKA_TOPIC: "spread-analytics"
+      SNOWFLAKE_ACCOUNT: "${SNOWFLAKE_ACCOUNT}"
+      SNOWFLAKE_USER: "${SNOWFLAKE_USER}"
+      SNOWFLAKE_PRIVATE_KEY_PATH: "/run/secrets/snowflake_key"
+      SNOWFLAKE_DATABASE: "${SNOWFLAKE_DATABASE}"
+      SNOWFLAKE_SCHEMA: "${SNOWFLAKE_SCHEMA:-PUBLIC}"
+      SNOWFLAKE_WAREHOUSE: "${SNOWFLAKE_WAREHOUSE}"
+      SNOWFLAKE_TABLE: "SPREAD_ANALYTICS"
+      SNOWFLAKE_BATCH_SIZE: "1000"
+      SNOWFLAKE_FLUSH_INTERVAL: "10"
+    secrets:
+      - snowflake_key
+    command: ["python", "-u", "consumer/snowflake_sink.py"]
+
+secrets:
+  snowflake_key:
+    file: ${SNOWFLAKE_PRIVATE_KEY_PATH:-./snowflake_rsa_key.p8}
+
+volumes:
+  kafka_kraft:
+  redis_data:
