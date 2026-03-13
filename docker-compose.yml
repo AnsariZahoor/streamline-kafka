@@ -91,40 +91,46 @@ services:
       KAFKA_TOPICS: "binance-futures-ticker,bybit-futures-ticker"
     command: ["python", "-u", "consumer/redis_sink.py"]
 
-  # localstack-snowflake:
-  #   image: localstack/snowflake:latest
-  #   container_name: localstack-snowflake
-  #   ports:
-  #     - "4566:4566"
-  #   environment:
-  #     LOCALSTACK_AUTH_TOKEN: "${LOCALSTACK_AUTH_TOKEN}"
-  #   volumes:
-  #     - localstack_data:/var/lib/localstack
+  # ── Feature Store Infrastructure ────────────────────────────────────
 
-  # snowflake-sink:
-  #   build: .
-  #   container_name: snowflake-sink
-  #   restart: unless-stopped
-  #   depends_on:
-  #     - kafka
-  #     - localstack-snowflake
-  #   environment:
-  #     KAFKA_BROKERS: kafka:9092
-  #     SNOWFLAKE_KAFKA_TOPIC: "spread-detector-signals"
-  #     SNOWFLAKE_HOST: localstack-snowflake
-  #     SNOWFLAKE_PORT: "4566"
-  #     SNOWFLAKE_ACCOUNT: "test"
-  #     SNOWFLAKE_USER: "test"
-  #     SNOWFLAKE_PASSWORD: "test"
-  #     SNOWFLAKE_DATABASE: "test"
-  #     SNOWFLAKE_SCHEMA: "PUBLIC"
-  #     SNOWFLAKE_WAREHOUSE: "test"
-  #     SNOWFLAKE_TABLE: "SPREAD_ANALYTICS"
-  #     SNOWFLAKE_BATCH_SIZE: "1000"
-  #     SNOWFLAKE_FLUSH_INTERVAL: "10"
-  #   command: ["python", "-u", "consumer/snowflake_sink.py"]
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  feature-sink:
+    build: .
+    container_name: feature-sink
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - minio
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      FEATURE_KAFKA_TOPICS: "binance-futures-ticker,bybit-futures-ticker"
+      S3_ENDPOINT_URL: http://minio:9000
+      FEATURE_S3_BUCKET: feature-store
+      FEATURE_S3_PREFIX: ticker_features
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      FEATURE_WINDOW_SECONDS: "300"
+      FEATURE_FLUSH_INTERVAL: "60"
+    command: ["python", "-u", "consumer/feature_sink.py"]
 
 volumes:
   kafka_kraft:
   redis_data:
-  # localstack_data:
+  minio_data:

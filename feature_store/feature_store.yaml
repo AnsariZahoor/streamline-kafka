@@ -1,0 +1,11 @@
+project: streamline_crypto
+provider: local
+registry:
+  path: data/registry.pb
+online_store:
+  type: redis
+  connection_string: ${FEAST_REDIS_URL:redis://localhost:6379}
+offline_store:
+  type: file
+  s3_endpoint_override: ${S3_ENDPOINT_URL:http://localhost:9000}
+entity_key_serialization_version: 2
