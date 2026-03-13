@@ -16,7 +16,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
 
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
@@ -24,17 +24,50 @@ services:
     volumes:
       - kafka_kraft:/var/lib/kafka/data
 
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: redpanda-console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      - kafka
+
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack:latest
     container_name: redis
     ports:
       - "6379:6379"
+      - "8001:8001"
     volumes:
       - redis_data:/data
 
-  futures-arbitrage:
+  producer-binance:
     build: .
-    container_name: futures-arbitrage
+    container_name: producer-binance
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      EXCHANGE: binance-futures
+    command: ["python", "-u", "producer/ws_binance.py"]
+
+  producer-bybit:
+    build: .
+    container_name: producer-bybit
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      EXCHANGE: bybit-futures
+    command: ["python", "-u", "producer/ws_bybit.py"]
+
+  spread-detector:
+    build: .
+    container_name: spread-detector
     restart: unless-stopped
     depends_on:
       - kafka
@@ -55,51 +88,43 @@ services:
       KAFKA_BROKERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
       REDIS_KEY_TTL: "60"
-      KAFKA_TOPICS: "binance-futures-ticker,binance-spot-ticker,bybit-futures-ticker,bybit-spot-ticker,hyperliquid-futures-ticker"
+      KAFKA_TOPICS: "binance-futures-ticker,bybit-futures-ticker"
     command: ["python", "-u", "consumer/redis_sink.py"]
 
-  spread-analytics:
-    build:
-      context: ./flink
-      dockerfile: Dockerfile
-    container_name: spread-analytics
-    restart: unless-stopped
-    depends_on:
-      - kafka
-    environment:
-      KAFKA_BROKERS: kafka:9092
-      FLINK_INPUT_TOPICS: "binance-futures-ticker,bybit-futures-ticker"
-      FLINK_OUTPUT_TOPIC: "spread-analytics"
-      SPREAD_WINDOW_SECONDS: "300"
-      FLINK_PARALLELISM: "1"
+  # localstack-snowflake:
+  #   image: localstack/snowflake:latest
+  #   container_name: localstack-snowflake
+  #   ports:
+  #     - "4566:4566"
+  #   environment:
+  #     LOCALSTACK_AUTH_TOKEN: "${LOCALSTACK_AUTH_TOKEN}"
+  #   volumes:
+  #     - localstack_data:/var/lib/localstack
 
-  snowflake-sink:
-    build: .
-    container_name: snowflake-sink
-    restart: unless-stopped
-    depends_on:
-      - kafka
-      - spread-analytics
-    environment:
-      KAFKA_BROKERS: kafka:9092
-      SNOWFLAKE_KAFKA_TOPIC: "spread-analytics"
-      SNOWFLAKE_ACCOUNT: "${SNOWFLAKE_ACCOUNT}"
-      SNOWFLAKE_USER: "${SNOWFLAKE_USER}"
-      SNOWFLAKE_PRIVATE_KEY_PATH: "/run/secrets/snowflake_key"
-      SNOWFLAKE_DATABASE: "${SNOWFLAKE_DATABASE}"
-      SNOWFLAKE_SCHEMA: "${SNOWFLAKE_SCHEMA:-PUBLIC}"
-      SNOWFLAKE_WAREHOUSE: "${SNOWFLAKE_WAREHOUSE}"
-      SNOWFLAKE_TABLE: "SPREAD_ANALYTICS"
-      SNOWFLAKE_BATCH_SIZE: "1000"
-      SNOWFLAKE_FLUSH_INTERVAL: "10"
-    secrets:
-      - snowflake_key
-    command: ["python", "-u", "consumer/snowflake_sink.py"]
-
-secrets:
-  snowflake_key:
-    file: ${SNOWFLAKE_PRIVATE_KEY_PATH:-./snowflake_rsa_key.p8}
+  # snowflake-sink:
+  #   build: .
+  #   container_name: snowflake-sink
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - kafka
+  #     - localstack-snowflake
+  #   environment:
+  #     KAFKA_BROKERS: kafka:9092
+  #     SNOWFLAKE_KAFKA_TOPIC: "spread-detector-signals"
+  #     SNOWFLAKE_HOST: localstack-snowflake
+  #     SNOWFLAKE_PORT: "4566"
+  #     SNOWFLAKE_ACCOUNT: "test"
+  #     SNOWFLAKE_USER: "test"
+  #     SNOWFLAKE_PASSWORD: "test"
+  #     SNOWFLAKE_DATABASE: "test"
+  #     SNOWFLAKE_SCHEMA: "PUBLIC"
+  #     SNOWFLAKE_WAREHOUSE: "test"
+  #     SNOWFLAKE_TABLE: "SPREAD_ANALYTICS"
+  #     SNOWFLAKE_BATCH_SIZE: "1000"
+  #     SNOWFLAKE_FLUSH_INTERVAL: "10"
+  #   command: ["python", "-u", "consumer/snowflake_sink.py"]
 
 volumes:
   kafka_kraft:
   redis_data:
+  # localstack_data:

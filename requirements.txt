@@ -3,3 +3,7 @@ python-dotenv
 redis
 snowflake-connector-python
 cryptography
+websocket-client
+feast[redis]
+boto3
+pyarrow

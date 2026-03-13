@@ -13,12 +13,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
 )
-logger = logging.getLogger('futures-arbitrage')
+logger = logging.getLogger('spread-detector')
 
 KAFKA_BROKERS = os.getenv('KAFKA_BROKERS', 'localhost:9092')
-INPUT_TOPICS = ['binance-futures', 'bybit-futures']
-OUTPUT_TOPIC = 'futures-arbitrage-signals'
-CONSUMER_GROUP = 'futures-arbitrage-group'
+INPUT_TOPICS = ['binance-futures-ticker', 'bybit-futures-ticker']
+OUTPUT_TOPIC = 'spread-detector-signals'
+CONSUMER_GROUP = 'spread-detector-group'
 
 THRESHOLD = float(os.getenv('ARBITRAGE_THRESHOLD', '0.2'))
 STALENESS_MAX_S = int(os.getenv('STALENESS_SECONDS', '5'))
@@ -102,14 +102,19 @@ class ArbitrageDetector:
             return
 
         try:
-            symbol = data['symbol']
-            price = float(data['price'])
-            ts = int(data['timestamp'])
+            symbol = data.get('symbol') or data['token']
+            fields = data.get('data', {})
+            raw_price = fields.get('price') or data.get('price')
+            if raw_price is None:
+                return
+            price = float(raw_price)
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(f"Malformed message fields: {e}")
             return
 
-        exchange = data.get('exchange', EXCHANGE_ALIASES.get(msg.topic()))
+        ts = int(data.get('timestamp', time.time()))
+        raw_exchange = data.get('exchange') or msg.topic()
+        exchange = EXCHANGE_ALIASES.get(raw_exchange, raw_exchange)
         if exchange not in REQUIRED_EXCHANGES:
             return
 
@@ -142,6 +147,7 @@ class ArbitrageDetector:
             return
 
         spread_pct = abs(yp - bp) / min_price * 100
+        logger.info(f"SPREAD {symbol} binance={bp} bybit={yp} spread={spread_pct:.4f}% threshold={THRESHOLD}%")
 
         if spread_pct > THRESHOLD:
             if bp < yp:

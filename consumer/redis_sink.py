@@ -112,7 +112,7 @@ class RedisSink:
 
         exchange = data.get('exchange')
         token = data.get('token')
-        fields = data.get('changed_fields')
+        fields = data.get('data')
 
         if not exchange or not token or not fields:
             return

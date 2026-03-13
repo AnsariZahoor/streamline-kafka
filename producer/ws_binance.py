@@ -4,13 +4,9 @@ import time
 import json
 import websocket
 import threading
-import pytz
-from datetime import datetime
 from functools import partial
 
 from confluent_kafka import Producer
-
-import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,27 +18,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-data_lock = threading.Lock()
-
 producer = Producer({
     'bootstrap.servers': os.getenv('KAFKA_BROKERS')
 })
 
-class ExchangeData:
-    def __init__(self):
-        self.dfs = {}
+columns_map = {'c': 'price', 'p': 'change', 'P': 'changeP', 'q': 'vol_usd', 'v': 'vol_native'}
 
-exchange_data = ExchangeData()
+
+def send_to_kafka(exchange, token, data):
+    producer.produce(
+        topic=f'{exchange}-ticker',
+        value=json.dumps({
+            'exchange': exchange,
+            'token': token,
+            'data': data
+        }),
+        callback=lambda err, msg: logger.error(f"Message delivery failed: {err}") if err else None
+    )
+
 
 def process_data(json_data, exchange):
-    df = pd.DataFrame(json_data)[['s','c','p','P','q','v']]
-    df = df[df['s'].str.endswith('USDT')]
-    df = df.rename(columns={'c':'price', 'p':'change', 'P':'changeP','q':'vol_usd','v':'vol_native'})
+    count = 0
+    for item in json_data:
+        symbol = item.get('s', '')
+        if not symbol.endswith('USDT'):
+            continue
 
-    with data_lock:
-        if exchange not in exchange_data.dfs:
-            exchange_data.dfs[exchange] = []
-        exchange_data.dfs[exchange].append(df)
+        data = {
+            columns_map[k]: float(item[k])
+            for k in columns_map
+            if k in item
+        }
+
+        send_to_kafka(exchange, symbol, data)
+        count += 1
+
+    producer.flush()
+    if count:
+        logger.info(f'{exchange.upper()} - Pushed {count} tickers to kafka')
 
 
 def on_message(ws, message, exchange):
@@ -85,88 +98,16 @@ def receive_data(exchange):
             logger.exception(f"{exchange.upper()} - WS error, reconnecting in 5s...")
         time.sleep(5)
 
-def upload_data_to_kafka(exchange):
-    previous_data = {}
-    logger.info(f'{exchange.upper()} - Running upload_data_to_kafka...')
-    while True:
-        try:
-            with data_lock:
-                frames = exchange_data.dfs.get(exchange, [])
-                if not frames:
-                    has_data = False
-                else:
-                    snapshot = list(frames)
-                    frames.clear()
-                    has_data = True
-
-            if not has_data:
-                time.sleep(0.25)
-                continue
-
-            final_df = pd.concat(snapshot)
-            final_df['e'] = exchange
-            final_df['updated_at'] = datetime.now(pytz.utc)
-            df_latest = final_df.drop_duplicates(subset='s', keep='last')
-
-            changed_data = []
-            columns = ['price', 'change', 'changeP', 'vol_usd', 'vol_native']
-
-            for _, row in df_latest.iterrows():
-                token = row['s']
-                current_values = row[columns].to_dict()
-
-                if token in previous_data:
-                    changed_fields = {
-                        field: float(current_values[field])
-                        for field in columns
-                        if field not in previous_data[token] or previous_data[token][field] != current_values[field]
-                    }
-                    if changed_fields:
-                        changed_data.append((token, changed_fields))
-                        previous_data[token].update(changed_fields)
-                else:
-                    changed_fields = {
-                        field: float(current_values[field])
-                        for field in columns
-                    }
-                    changed_data.append((token, changed_fields))
-                    previous_data[token] = current_values
-
-            if changed_data:
-                logger.info(f'{exchange.upper()} - Updated to kafka: {len(changed_data)}')
-
-                for token, changed_fields in changed_data:
-                    producer.produce(
-                        topic=f'{exchange}-ticker',
-                        value=json.dumps({
-                            'exchange': exchange,
-                            'token': token,
-                            'data': changed_fields
-                        }),
-                        callback=lambda err, msg: logger.info(f"Message delivered to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}")
-                                if err is None else logger.error(f"Message delivery failed: {err}")
-                    )
-
-                producer.flush()
-
-        except Exception:
-            logger.exception(f"{exchange.upper()} - Kafka upload error, retrying...")
-            time.sleep(1)
 
 def run(exchange):
-    thread1 = threading.Thread(target=receive_data, args=(exchange,))
-    thread2 = threading.Thread(target=upload_data_to_kafka, args=(exchange,))
-    
-    thread1.daemon = True
-    thread2.daemon = True
-
-    thread1.start()
-    thread2.start()
+    thread = threading.Thread(target=receive_data, args=(exchange,))
+    thread.daemon = True
+    thread.start()
 
     try:
         while True:
             time.sleep(1)
-            if not thread1.is_alive() or not thread2.is_alive():
+            if not thread.is_alive():
                 logger.error("Critical thread died. Terminating program...")
                 os._exit(1)
     except KeyboardInterrupt:
@@ -178,5 +119,5 @@ def run(exchange):
 
 
 if __name__ == '__main__':
-    exchange = 'binance-futures'
+    exchange = os.getenv('EXCHANGE', 'binance-futures')
     run(exchange)

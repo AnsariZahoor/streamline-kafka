@@ -5,8 +5,6 @@ import signal
 import logging
 from datetime import datetime, timezone
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
 import snowflake.connector
 from dotenv import load_dotenv
 from confluent_kafka import Consumer, KafkaError, KafkaException
@@ -20,15 +18,17 @@ logging.basicConfig(
 logger = logging.getLogger('snowflake-sink')
 
 KAFKA_BROKERS = os.getenv('KAFKA_BROKERS', 'localhost:9092')
-INPUT_TOPIC = os.getenv('SNOWFLAKE_KAFKA_TOPIC', 'spread-analytics')
+INPUT_TOPIC = os.getenv('SNOWFLAKE_KAFKA_TOPIC', 'spread-detector-signals')
 CONSUMER_GROUP = 'snowflake-sink-group'
 
-SNOWFLAKE_ACCOUNT = os.getenv('SNOWFLAKE_ACCOUNT')
-SNOWFLAKE_USER = os.getenv('SNOWFLAKE_USER')
-SNOWFLAKE_PRIVATE_KEY_PATH = os.getenv('SNOWFLAKE_PRIVATE_KEY_PATH')
-SNOWFLAKE_DATABASE = os.getenv('SNOWFLAKE_DATABASE')
+SNOWFLAKE_HOST = os.getenv('SNOWFLAKE_HOST')
+SNOWFLAKE_PORT = int(os.getenv('SNOWFLAKE_PORT', '4566'))
+SNOWFLAKE_ACCOUNT = os.getenv('SNOWFLAKE_ACCOUNT', 'test')
+SNOWFLAKE_USER = os.getenv('SNOWFLAKE_USER', 'test')
+SNOWFLAKE_PASSWORD = os.getenv('SNOWFLAKE_PASSWORD', 'test')
+SNOWFLAKE_DATABASE = os.getenv('SNOWFLAKE_DATABASE', 'test')
 SNOWFLAKE_SCHEMA = os.getenv('SNOWFLAKE_SCHEMA', 'PUBLIC')
-SNOWFLAKE_WAREHOUSE = os.getenv('SNOWFLAKE_WAREHOUSE')
+SNOWFLAKE_WAREHOUSE = os.getenv('SNOWFLAKE_WAREHOUSE', 'test')
 SNOWFLAKE_TABLE = os.getenv('SNOWFLAKE_TABLE', 'SPREAD_ANALYTICS')
 
 BATCH_SIZE = int(os.getenv('SNOWFLAKE_BATCH_SIZE', '1000'))
@@ -61,35 +61,27 @@ class SnowflakeSink:
 
     # ── snowflake connection ────────────────────────────────────────────
 
-    def _load_private_key_der(self) -> bytes:
-        passphrase = os.getenv('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE', '')
-        with open(SNOWFLAKE_PRIVATE_KEY_PATH, 'rb') as f:
-            private_key = serialization.load_pem_private_key(
-                f.read(),
-                password=passphrase.encode() if passphrase else None,
-                backend=default_backend(),
-            )
-        return private_key.private_bytes(
-            encoding=serialization.Encoding.DER,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-
     def _connect(self):
         if self.conn:
             try:
                 self.conn.close()
             except Exception:
                 pass
-        self.conn = snowflake.connector.connect(
-            account=SNOWFLAKE_ACCOUNT,
-            user=SNOWFLAKE_USER,
-            private_key=self._load_private_key_der(),
-            database=SNOWFLAKE_DATABASE,
-            schema=SNOWFLAKE_SCHEMA,
-            warehouse=SNOWFLAKE_WAREHOUSE,
-        )
-        logger.info(f"Connected to Snowflake {SNOWFLAKE_ACCOUNT} / {SNOWFLAKE_DATABASE}")
+
+        connect_kwargs = {
+            'account': SNOWFLAKE_ACCOUNT,
+            'user': SNOWFLAKE_USER,
+            'password': SNOWFLAKE_PASSWORD,
+            'database': SNOWFLAKE_DATABASE,
+            'schema': SNOWFLAKE_SCHEMA,
+            'warehouse': SNOWFLAKE_WAREHOUSE,
+        }
+        if SNOWFLAKE_HOST:
+            connect_kwargs['host'] = SNOWFLAKE_HOST
+            connect_kwargs['port'] = SNOWFLAKE_PORT
+
+        self.conn = snowflake.connector.connect(**connect_kwargs)
+        logger.info(f"Connected to Snowflake {SNOWFLAKE_HOST or SNOWFLAKE_ACCOUNT} / {SNOWFLAKE_DATABASE}")
 
     # ── main loop ───────────────────────────────────────────────────────
 

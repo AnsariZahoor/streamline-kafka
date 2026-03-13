@@ -18,8 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-data_lock = threading.Lock()
-
 producer = Producer({
     'bootstrap.servers': os.getenv('KAFKA_BROKERS')
 })
@@ -35,17 +33,20 @@ BYBIT_PAIRS = [
     "UNIUSDT", "LTCUSDT", "ATOMUSDT", "NEARUSDT", "AAVEUSDT",
     "OPUSDT", "ARBUSDT", "SUIUSDT", "APTUSDT", "INJUSDT",
     "FILUSDT", "SEIUSDT", "TIAUSDT", "JUPUSDT", "WUSDT",
-    "ENAUSDT", "TONUSDT", "PEPEUSDT", "WIFUSDT", "ONDOUSDT",
+    "ENAUSDT", "TONUSDT", "WIFUSDT", "ONDOUSDT",
 ]
 
-required_keys = ['lastPrice', 'prevPrice24h', 'price24hPcnt', 'turnover24h', 'volume24h']
 
-
-class ExchangeData:
-    def __init__(self):
-        self.ticker_data = {}
-
-exchange_data = ExchangeData()
+def send_to_kafka(exchange, token, data):
+    producer.produce(
+        topic=f'{exchange}-ticker',
+        value=json.dumps({
+            'exchange': exchange,
+            'token': token,
+            'data': data
+        }),
+        callback=lambda err, msg: logger.error(f"Message delivery failed: {err}") if err else None
+    )
 
 
 def process_data(json_data, exchange):
@@ -57,17 +58,24 @@ def process_data(json_data, exchange):
 
     symbol = data['symbol']
 
-    with data_lock:
-        exchange_data.ticker_data.setdefault(exchange, {})
-        exchange_data.ticker_data[exchange].setdefault(symbol, {})
+    last_price = float(data.get('lastPrice', 0)) if 'lastPrice' in data else None
+    prev_price = float(data.get('prevPrice24h', 0)) if 'prevPrice24h' in data else None
 
-        exchange_data.ticker_data[exchange][symbol].update(
-            (key, data[key]) for key in required_keys if key in data
-        )
+    ticker = {}
+    if last_price is not None:
+        ticker['price'] = last_price
+    if prev_price is not None and last_price is not None:
+        ticker['change'] = last_price - prev_price
+    if 'price24hPcnt' in data:
+        ticker['changeP'] = float(data['price24hPcnt']) * 100
+    if 'turnover24h' in data:
+        ticker['vol_usd'] = float(data['turnover24h'])
+    if 'volume24h' in data:
+        ticker['vol_native'] = float(data['volume24h'])
 
-        ticker = exchange_data.ticker_data[exchange][symbol]
-        if 'lastPrice' in ticker and 'prevPrice24h' in ticker:
-            ticker['change'] = float(ticker['lastPrice']) - float(ticker['prevPrice24h'])
+    if ticker:
+        send_to_kafka(exchange, symbol, ticker)
+        producer.poll(0)
 
 
 def send_ping(ws):
@@ -143,86 +151,15 @@ def receive_data(exchange):
         time.sleep(5)
 
 
-def upload_data_to_kafka(exchange):
-    previous_data = {}
-    logger.info(f'{exchange.upper()} - Running upload_data_to_kafka...')
-    while True:
-        try:
-            with data_lock:
-                raw = exchange_data.ticker_data.get(exchange)
-                if not raw:
-                    has_data = False
-                else:
-                    ticker_data_copy = {sym: dict(vals) for sym, vals in raw.items()}
-                    has_data = True
-
-            if not has_data:
-                time.sleep(0.25)
-                continue
-
-            changed_data = []
-            columns = ['price', 'change', 'changeP', 'vol_usd', 'vol_native']
-
-            for token, data in ticker_data_copy.items():
-                current_values = {
-                    'price': data.get('lastPrice', 0),
-                    'change': data.get('change', 0),
-                    'changeP': float(data.get('price24hPcnt', 0)) * 100,
-                    'vol_usd': data.get('turnover24h', 0),
-                    'vol_native': data.get('volume24h', 0),
-                }
-
-                if token in previous_data:
-                    changed_fields = {
-                        field: float(current_values[field])
-                        for field in columns
-                        if field not in previous_data[token] or previous_data[token][field] != current_values[field]
-                    }
-                    if changed_fields:
-                        changed_data.append((token, changed_fields))
-                        previous_data[token].update(changed_fields)
-                else:
-                    changed_fields = {
-                        field: float(current_values[field])
-                        for field in columns
-                    }
-                    changed_data.append((token, changed_fields))
-                    previous_data[token] = current_values
-
-            if changed_data:
-                logger.info(f'{exchange.upper()} - Updated to kafka: {len(changed_data)}')
-                for token, changed_fields in changed_data:
-                    producer.produce(
-                        topic=f'{exchange}-ticker',
-                        value=json.dumps({
-                            'exchange': exchange,
-                            'token': token,
-                            'data': changed_fields
-                        }),
-                        callback=lambda err, msg: logger.info(f"Message delivered to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}")
-                                if err is None else logger.error(f"Message delivery failed: {err}")
-                    )
-                producer.flush()
-
-        except Exception:
-            logger.exception(f"{exchange.upper()} - Kafka upload error, retrying...")
-            time.sleep(1)
-
-
 def run(exchange):
-    thread1 = threading.Thread(target=receive_data, args=(exchange,))
-    thread2 = threading.Thread(target=upload_data_to_kafka, args=(exchange,))
-
-    thread1.daemon = True
-    thread2.daemon = True
-
-    thread1.start()
-    thread2.start()
+    thread = threading.Thread(target=receive_data, args=(exchange,))
+    thread.daemon = True
+    thread.start()
 
     try:
         while True:
             time.sleep(1)
-            if not thread1.is_alive() or not thread2.is_alive():
+            if not thread.is_alive():
                 logger.error("Critical thread died. Terminating program...")
                 os._exit(1)
     except KeyboardInterrupt:
@@ -234,5 +171,5 @@ def run(exchange):
 
 
 if __name__ == '__main__':
-    exchange = 'bybit-futures'
+    exchange = os.getenv('EXCHANGE', 'bybit-futures')
     run(exchange)
