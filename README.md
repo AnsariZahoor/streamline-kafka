@@ -2,7 +2,7 @@
 
 A real-time data streaming pipeline that ingests live cryptocurrency ticker data from multiple exchanges via Kafka and serves ML-ready features through Feast.
 
-![image](https://media.discordapp.net/attachments/1472256547722629382/1482202719883235451/image.png?ex=69b6185a&is=69b4c6da&hm=59d7a05f111601f8b9f0cbe39b702e17e71f4e997a3efa4ef995612cbb64e670&=&format=webp&quality=lossless&width=887&height=562)
+![image](https://media.discordapp.net/attachments/1472256547722629382/1482202719883235451/image.png?ex=69d1c7da&is=69d0765a&hm=0977ce4775119c37143b48f7b40bd59b9874744aca6c8108a22bb1f1af075b60&=&format=webp&quality=lossless&width=967&height=612)
 
 ## Why Kafka?
 
